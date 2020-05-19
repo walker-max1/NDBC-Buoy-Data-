@@ -1,0 +1,519 @@
+---
+title: "Exploring Ocean Buoy Data"
+subtitle: 'Part 4.1: Feature Engineering and Mapping Labels to Observations'
+author: "Max Walker"
+date: "5/1/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,
+                      include = TRUE)
+library(tidyverse)
+library(dplyr)
+library(lubridate)
+library(knitr)
+library(rmarkdown)
+library(gridExtra)
+library(ggpubr)
+library(kableExtra)
+library(scales)
+library(formattable)
+library(stats)
+
+setwd('C:/Users/walke/Documents/Wave Project')
+
+```
+
+
+```{r load data}
+
+#load data 46088
+data_ND <- read.csv('C:/Users/walke/Documents/Wave Project/Waves ND/historical data/historical_46088_04_19.csv')
+
+swell <- data_ND %>% select(id, Date_Time, WVHT, MWD, dir, swell_type, DPD, APD, WDIR, w_dir, WSPD, GST, PRES, ATMP, WTMP, DEWP)
+
+#load data 46087
+data_NB <- read.csv(file = 'C:/Users/walke/Documents/Wave Project/Waves NB/Historical Wave Data/historical_46087_04_19.csv')
+
+data_NB <- data_NB %>% select(id, Date_Time, WVHT, MWD, dir, swell_type, DPD, APD, WDIR, w_dir, WSPD, GST, PRES, ATMP, WTMP, DEWP)
+
+#append 46087 to swell
+swell <- rbind(swell, data_NB)
+
+#change to factors
+swell$id <- as.factor(swell$id)
+
+#reorder factors
+swell$swell_type <- factor(swell$swell_type, levels = c('groundswell', 'windswell', 'windwave', 'chop', 'flat'))
+
+#create condensed swell_type2:  swell/wave/flat
+swell$swell_type2 <- NA
+swell$swell_type2[swell$swell_type %in% c('groundswell', 'windswell')] <- 'swell'
+swell$swell_type2[swell$swell_type %in% c('windwave', 'chop')] <- 'wave'
+swell$swell_type2[swell$swell_type == 'flat'] <- 'flat'
+
+swell$swell_type2 <- factor(swell$swell_type2, levels = c('swell', 'wave', 'flat'))
+
+#change dir and w_dir levels to be in order clockwise starting at E
+levels <- c('E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW', 'N', 'NNE', 'NE', 'ENE')
+
+levels_N <- c('N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW')
+
+swell$dir <- factor(swell$dir, levels = levels)
+
+swell$w_dir <- factor(swell$w_dir, levels = levels)
+
+#change Date_Time to POSIXct timezone = 'GMT'
+swell$Date_Time <- ymd_hms(swell$Date_Time)
+swell$Date_Time <- as.POSIXct(swell$Date_Time, tz = 'GMT')
+
+#define NB and ND datasets
+NB <- swell %>%
+  filter(id == 46087) %>% na.omit()
+
+ND <- swell %>%
+  filter(id == 46088 & WSPD <= 10 ) %>% na.omit()
+
+#set MWD[wvht == 0] <- WDIR[wvht = 0]
+ND$MWD[ND$WVHT == 0 & ND$DPD == 0] <- ND$WDIR[ND$WVHT == 0 & ND$DPD == 0]
+
+
+```
+
+
+
+# Project Outline 
+
+
+This report is the preliminary to Part 4 in a five part series in which we are exploring and analyzing ocean buoy data collected from NOAA maintained National Data Buoy Center (NDBC) stations.  In **Part 1** we explored ocean current observations at the NDBC Station 46087 (Neah Bay Buoy) and compared them with ocean current forecasts from a third party.  In **Part 2** we took a look at meteorological (wind and wave) data from the Neah Bay Buoy and examined the potential for significant meteorological events to introduce noise in ocean current observations.  In **Part 3** we introduced meteorological data for another location, NDBC Station 46088 (New Dungeness Buoy), and compared trends in wave height, period, and direction with those of the Neah Bay Buoy.  We highlighted the relationship between swell events at the Neah Bay Buoy and swell events at the New Dungeness Buoy.  Here in **Part 4** we will walk through considerations and processes involved in training and testing a supervised ML model to predict the class of wave which might occur at the New Dungeness Buoy given conditions at the Neah Bay Buoy.  In **Part 5** we will put our final classifier model in production by supplying forecasted conditions for the Neah Bay Station and determining the predicted class of wave observed at the New Dungeness Station.  
+
+More detailed information regarding the NDBC, and the locations of buoys they maintain, can be found on their [website](https://www.ndbc.noaa.gov/).  
+
+
+
+## Executive Summary: Part 4.1
+
+The two main objectives of **Part 4.1** are to describe the methods used to map the class of observed swell type (groundswell, windswell, windwave, chop, or flat) at the New Dungenss Buoy to conditions at the Neah Bay Buoy, and to describe several new features.  In addition, we discuss thresholds applied to the New Dungeness Buoy data.
+
+Moving forward in our analysis, several conditions have been implemented regarding the New Dungeness Buoy Data.  Given the analysis performed in **Part 3**, we have set a threshold to only include observations which have a local windspeed of 10 m/s or less in order to allow for the maximized intersection of data quantity and accuracy of observations.  In addition, for any 'flat' conditions the mean wave direction (MWD) has been set to the wind direction (WDIR), and finally, observations containing any missing data have been removed.  We are left with approximately 144,000 observed swell classes at the New Dungeness Buoy.
+
+In order to incorporate the ocean current predictions data validated in **Part 2**, I have generated an interpolation of this data to generate a predicted ocean current given a date and time within the range of the ocean current predictions data.  This interpolation is utilized to develope several new features, including daily NET and AVG currents, and a feature called lag.  
+
+The algorithm used to define *lag* produces a value which points observations with longer periods and a more Northwesterly direction closer to zero, and observations with shorter periods and directions further away from Northwesterly in the opposite direction.  With further consideration, This *lag* feature could be useful to assist in a more direct mapping of the New Dungeness labels to observations of conditions at the Neah Bay Buoy.  Given the inherently complicated nature of a direct mapping, I have choosen to continue with this project using a more simple method of connecting swell types at the New Dungeness Buoy with observations at the Neah Bay Buoy.
+
+I have choosen to utilize a binning method, or averaging method, to connect swell type observations at the New Dungeness Buoy with conditions at the Neah Bay Buoy.  This involves the averaging of Neah Bay Buoy conditions immediately preceeding the time of a swell type observation at the New Dungeness Buoy.  For label types of groundswell and windswell at the New Dungeness Buoy I have choosen to average the preceeding two hours worth of conditions at the Neah Bay Buoy, and assign the averaged results with the corresponding label.  For windwave, chop, and flat swell types at the New Dungeness Buoy I have choosen to average the preceeding four hours worth of conditions at the Neah Bay Buoy, assigning those averaged results with the corresponding label.  This method does have it's pitfalls, as it 'smooths over' variance from the data through the averaging of potentially overlapping conditions.
+
+
+
+### Data
+
+The meteorological data we are employing in this process has been acquired through the NDBC [website](https://www.ndbc.noaa.gov/).  Nicely formatted, yearly '.txt' files are available for download for years 2004 to 2019, and some wrangling is necesseray.  Issues regarding data quality include:  the addition of the minute of observation column in 2005, a re-assignment of variable names beginning in 2007, several shifts in the frequency of recorded observations, as well as a considerable number of missing observations.  Further definitions and descriptions for each field in this dataset can be found in the appendix of the report for **Part 3** and on the NDBC's [measurement definitions](https://www.ndbc.noaa.gov/measdes.shtml) webpage.  
+
+In addition to the NDBC's meteorological data, we will be using ocean current predictions data I acquired from the [Mobile Geographics](https://tides.mobilegeographics.com/) website through the use of Microsoft Excel's Power Query feature.  Review the report for **Part 1** for further information regarding this dataset.  
+
+
+
+### Generating Ocean Current Predictions
+
+In Part 1 of this project we introduced and examined ocean current predictions and observtions for the Neah Bay Buoy.  In Part 2 we validated the prediction data by showing that instances where ocean current observations deviated from predictions align with strong meteorological events.  We concluded that this ocean current prediction data is a valid representation of how we could expect ocean currents to behave at the Neah Bay Buoy in the absence of meteorological events or other contributing factors.  
+
+Let's look at a short period of these predictions, April 4th to 11th, 2016:
+
+
+```{r get ocean current predictions data, fig.width=10, fig.height=8}
+
+###       #Obtain Ocean current predictions from predictions data
+C <- read.csv('C:/Users/walke/Documents/Wave Project/Current Predictions NB/Mobile Geographics Data/currentPred_MG_NB_04_21.csv')
+
+C <- C %>% select(Date_Time, Event, cm_s)
+
+#set ebb events to negative
+C$cm_s[C$Event == 'Ebb'] <- C$cm_s[C$Event == 'Ebb'] * -1
+
+C$Date_Time <- as.POSIXct(ymd_hms(as.character(C$Date_Time)))
+
+#plot sample
+C %>%
+  filter(year(C$Date_Time) == 2016 & month(C$Date_Time) == 4 & day(C$Date_Time) %in% c(4:11)) %>%
+  ggplot(aes(x = Date_Time, y = cm_s)) +
+  geom_point(size = 3, color = 'red', alpha = 0.7) +
+#  geom_line() +
+  geom_hline(yintercept = 0,
+             color = 'black',
+             alpha = 0.3) +
+  labs(title = "Ocean Current Predictions",
+       subtitle = 'For lat/long at NDBC Station 46087',
+       x = 'April 4th to 11th, 2016',
+       y = 'Speed (cm/s)')
+  
+```
+
+
+We can see that the data only contains prediction values for 'peak events.'  That is, each point represents a maximum flood, maximum ebb, or slack event.  
+
+Let's connect the dots, giving an estimate of how the ocean current is expected to behave between peak event predictions:
+
+
+```{r current pred, fig.width=10, fig.height=8}
+C %>%
+  filter(year(C$Date_Time) == 2016 & month(C$Date_Time) == 4 & day(C$Date_Time) %in% c(4:11)) %>%
+  ggplot(aes(x = Date_Time, y = cm_s)) +
+  geom_point(size = 3, color = 'red', alpha = 0.7) +
+  geom_line(color = 'blue',
+            alpha = 0.3) +
+  geom_hline(yintercept = 0,
+             color = 'black',
+             alpha = 0.3) + 
+  labs(title = "Ocean Current Predictions",
+       subtitle = 'For lat/long at NDBC Station 46087',
+       x = 'April 4th to 11th, 2016',
+       y = 'Speed (cm/s)')
+```
+
+
+Some might argue that a more realistic representation would show the line taking a more sinusoidal form.  For the sake of simplicity let's assume this is an accurate enough representation.  I have created an interpolation of this data which takes any date and time (rounded to nearest second) in the range of the predictions data set, and produces a value corresponding to the expected ocean current.  
+
+Let's overlay predicted ocean current readings using about 30 randomly generated times within this date range, passed through the data interpolation function:
+
+
+```{r interpolated current, fig.width=10, fig.height=8, warning=FALSE}
+set.seed(789677)
+
+#interpolate missing data points using approxfun
+f <- approxfun(x = C$Date_Time, y = C$cm_s)
+
+# set start and end dates to sample between
+day.start <- "2016/04/04"
+day.end <- "2016/04/10"
+
+# define a random date/time selection function
+rand.day.time <- function(day.start, day.end, size) {
+  dayseq <- seq.Date(as.Date(day.start), as.Date(day.end), by="day")
+  dayselect <- sample(dayseq, size, replace=TRUE)
+  hourselect <- sample(01:24, size, replace=TRUE)
+  minselect <- sample(00:59, size, replace=TRUE)
+  as.POSIXct(paste(dayselect, hourselect, ":", minselect, sep="") )
+}
+
+
+#generate random date/times in range
+d <- tibble(randDateTime = rand.day.time(day.start, day.end, size = 31))
+
+#check f() for accuracy
+C %>%
+  filter(year(C$Date_Time) == 2016 & month(C$Date_Time) == 4 & day(C$Date_Time) %in% c(4:11)) %>%
+  ggplot(aes(x = Date_Time, y = cm_s)) +
+  geom_point(size = 3, color = 'red', alpha = 0.7) +
+  geom_line(color = 'blue',
+            alpha = 0.3) +
+  geom_hline(yintercept = 0,
+             color = 'black',
+             alpha = 0.3) +
+  labs(title = "Ocean Current Predictions",
+       subtitle = 'For lat/long at NDBC Station 46087',
+       x = 'April 4th to 11th, 2016',
+       y = 'Speed (cm/s)',
+       caption = 'Green Dots are Interpolated Values for Randomly Generated Times') +
+  geom_point(data = d,
+             aes(x= randDateTime, y = f(randDateTime)),
+             size = 2, color = 'green', alpha = 0.7)
+
+
+
+# set NB$currents == f(NB$Date_Time)
+NB$currents <- f(NB$Date_Time)
+
+
+```
+
+
+Very nice, we will use this data interpolation to assign a predicted ocean current for each observation at the Neah Bay Buoy.  This will be a convenient way to combine ocean current data with our meteorological observations.  Additionally, we will use this tool in creating several new features.
+
+
+
+### Feature Engineering: Daily Net and Daily Average Ocean Currents
+
+
+Using the ocean current prediction data-interpolation I have created two new features describing daily ocean current predictions.  *NETcurrent* is the cumulative sum of current predictions for all 86400 seconds in each day, while *AVGcurrent* is the daily average speed in cm/s of those predictions.  These features will allow us to gain insight into how the ocean current was predicted to behave over the course of the day, as opposed to a simple slice in time for a specific observation. 
+
+Lets take a look at the range of NETcurrent from 2005 to 2019, and again on a yearly basis from 2016 to 2019:
+
+```{r NET AVG current}
+## Daily Net Ocean Currents Feature
+
+#extract unique dates from NB dataset, and set start and end
+z <- tibble(start = unique(as_date(NB$Date_Time)), end = start + seconds(86400))
+z$sum <- NA
+z$average <- NA
+
+#calculate sum and average currents for each day
+for (i in 1:length(z$start)) {
+  s <- 0
+  for (j in seq.POSIXt(as_datetime(z$start[i]), as_datetime(z$end[i]), by = 'sec')) {
+    
+    c <- f(j)
+    
+    s <- sum(s+c)
+    a <- s/86400
+    
+  }
+  
+  z$sum[i] <- s
+  z$average[i] <- a
+}
+
+
+
+for (i in z$start) {
+  NB$NETcurrent[as_date(NB$Date_Time) == i] <- z$sum[z$start == i]
+  NB$AVGcurrent[as_date(NB$Date_Time) == i] <- z$average[z$start == i]
+  
+  
+}
+
+
+```
+
+```{r net/avg current plot, fig.width=10, fig.height=8}
+
+NB %>%
+  filter(year(Date_Time) > 2004) %>%
+  ggplot(aes(x = Date_Time, y = NETcurrent)) +
+  geom_col(aes(fill = factor(month(Date_Time))),
+           alpha = 0.5) +
+  scale_y_continuous(labels = c('2.5 M', '2 M', '1.5 M', '1 M', '500 k', '0')) +
+  labs(title = 'Daily Net Ocean Current Predictions',
+       subtitle = 'NDBC Station 46087',
+       x = '',
+       y = 'Daily Net Current (cm)',
+       fill = 'Month',
+       caption = '1 million cm is 10 km')
+
+years <- c(2016:2019)
+
+for (i in years) {
+p <-  NB %>%
+  filter(year(Date_Time) == i) %>%
+  ggplot(aes(x = Date_Time, y = NETcurrent)) +
+  geom_col(aes(fill = factor(month(Date_Time))),
+           alpha = 0.5) +
+  scale_y_continuous(labels = c('-2.5 M', '-2 M', '-1.5 M', '-1 M', '-500 k', '0')) +
+  labs(title = 'Daily Net Ocean Current Predictions',
+       subtitle = 'NDBC Station 46087',
+       x = i,
+       y = 'Daily Net Current (cm)',
+       fill = 'Month', 
+       caption = '1 million cm is 10 km')
+  
+print(p)
+
+}
+
+
+```
+
+
+We can see that the NETcurrent values are always negative.  There may be some slight seasonal trends, with April through June, and December to January, tpically showing the smallest NETcurrent value, but nothing extremely obvious.  We do notice however, some definite patterns on a more weekly granularity.
+
+
+### Feature Engineering: Lag
+
+
+How much time elapses between when a swell is recorded on the Neah Bay Buoy and then again on the New Dungeness Buoy?  This seems like it should be a simple calculation of distance travelled vs wave speed.  But don't forget to consider ocean currents, wave direction, local winds, and the effect of long period swells feeling/grabbing the ocean floor sooner than shorter period swells.  A great summation of wave mechanics can be found [here](http://www.stormsurf.com/page2/tutorials/wavebasics.shtml).
+
+So what are we to do?  We can use the data we have available to define a feature called *lag*, which will assign a value closer to zero for observations at the Neah Bay Buoy for which logic tells us should arrive at the New Dungeness Buoy sooner.  Observations with smaller lag values will exhibit longer periods, a mean wave direction closer to NW, and currents with strong flood values.   
+
+According to NOAA's [Latitude/Longitude Distance Calculator](https://www.nhc.noaa.gov/gccalc.shtml), the distance between the two bouys is approximately 62 nautical miles, which is approximately 114824 meters.
+
+A general rule of thumb to determine the speed a wave in knts is to multiply the wave's period by 1.5.  Therefore we can multiply the period by 77.1667 to determine an approximate speed in cm/s.
+
+Next, let's determine an appropriate method of weighting swell direction.  This is an area where further logic and effort can produce a better representation of the expected lag associated with an observation.  My simplistic approach has been to weight observations with a NW direction larger (1.0), and symmetrically reduce weighted values as the mean wave direction moves away from the NW.  Observations with a mean wave direction of SE (opposite of NW) receive a weight of 0.1.
+
+If we combine wave speed and the predicted ocean current, then multiply that sum by the swell direction weight we have a vector of sorts.  We can then define lag as the inverse of that vector.  This will assign a lag value closer to zero for observations which are travelling faster (wave speed plus currents) and approaching from the NW.  Lag values will be highest for observations moving slower, fighting ocean current, and approaching from the SE.
+
+Let's take a quick look at these lag values:
+
+
+```{r lag values, fig.width=10, fig.height=8}
+
+#wave speed is dominant period mult by 1.5knts or 77.166667 cm/s
+NB$WVSPD <- NB$DPD*77.1666667
+
+# set NB$currents == f(NB$Date_Time)
+NB$currents <- f(NB$Date_Time)
+
+###         #define NB$DFAC 
+NB$DFAC <- NA
+NB$DFAC[NB$dir %in% c('NW')] <- 1
+NB$DFAC[NB$dir %in% c('WNW', 'NNW')] <- 0.9 
+NB$DFAC[NB$dir %in% c('W', 'N')] <- 0.8
+NB$DFAC[NB$dir %in% c('NNE', 'WSW')] <- 0.5
+NB$DFAC[NB$dir %in% c('NE', 'SW')] <- 0.4
+NB$DFAC[NB$dir %in% c('ENE', 'SSW')] <- 0.3
+NB$DFAC[NB$dir %in% c('E', 'S')] <- 0.2
+NB$DFAC[NB$dir %in% c('ESE', 'SSE')] <- 0.1
+NB$DFAC[NB$dir %in% c('SE')] <- 0.1
+
+# Define NB$WVEC as (DFAC)*(current + WVSPD)
+NB$WVEC <- (NB$DFAC)*(NB$currents + NB$WVSPD)
+
+###          #define lag as 1/WVEC
+NB$lag <- 1/NB$WVEC
+
+```
+
+
+```{r explore lag 1, fig.width=10, fig.height=8}
+ NB %>%
+   ggplot(aes(x = Date_Time, y = lag)) +
+   geom_point(aes(color = dir,
+                  shape = swell_type),
+              alpha = .3) +
+   scale_color_hue(drop = FALSE) +
+  scale_shape(drop = FALSE) +
+   labs(title = 'Lag Values for Wave Observations',
+        subtitle = 'NDBC 46087',
+        x = 'Date',
+        y = 'Lag Value',
+        caption = 'Larger values indicate conditions not conducive to swell access
+       Smaller values indicate conditions conducive to swell access')
+
+```
+ 
+ 
+Let's zoom in on small lag values less than or equal to 0.005:
+ 
+ 
+```{r explore lag 2, fig.width=10, fig.height=8}
+ 
+ #filter to small lag value <= 0.005
+ NB %>%
+   filter(NB$lag <= 0.005 ) %>%
+   ggplot(aes(x = Date_Time, y = lag)) +
+   geom_point(aes(color = dir,
+                  shape = swell_type),
+              alpha = 0.5) +
+   scale_color_hue(drop = FALSE) +
+  scale_shape(drop = FALSE) +
+   labs(title = 'Lag Values for Wave Observations',
+        subtitle = 'NDBC 46087',
+        x = 'Date',
+        y = 'Lag Value',
+        caption = 'Larger values indicate conditions not conducive to swell access
+       Smaller values indicate conditions conducive to swell access')
+ 
+```
+ 
+ 
+We notice an overlapping range of lag value for wave observations with directions indicated by green and blue colors.  Recall the seasonality in mean wave direction we observed in our analysis of conditions at the Neah Bay Buoy in parts 2 and 3.
+ 
+Let's look even closer at the smallest of lag values, those less than 0.001:
+ 
+ 
+```{r explore lag3, fig.width=10, fig.height=8}
+
+
+m <- min(NB$lag)
+
+g <- NB$Date_Time[NB$lag == m]
+
+
+
+ #filter to include only small lag value <= 0.001
+ NB %>%
+   filter(NB$lag <= 0.001 ) %>%
+   ggplot(aes(x = Date_Time, y = lag)) +
+   geom_tile(aes(x = g, y = m, width = 25000000, height = 0.000025),
+            alpha = 0.1,
+            fill = 'bisque1',
+            color = 'orange2') +
+   geom_point(aes(color = dir,
+                  shape = swell_type),
+              alpha = 0.5,
+              size = 2) +
+   scale_color_hue(drop = FALSE) +
+   scale_shape(drop = FALSE) +
+   labs(title = 'Lag Values for Wave Observations',
+        subtitle = 'NDBC 46087',
+        x = 'Date',
+        y = 'Lag Value',
+        caption = 'Larger values indicate conditions not conducive to swell access
+       Smaller values indicate conditions conducive to swell access')
+   
+
+ 
+ 
+```
+
+
+The way we have defined lag, we would expect the smallest lag value to have the shortest travel time to the New Dungeness Buoy.  Let's inspect conditions at the Neah Bay and New Dungeness bouys around 2am on July 3rd, 2019, which corresponds to the lag value highlighted in the yellow box above.
+
+
+```{r inspect lag 4, fig.width=10, fig.height=8}
+swell %>%
+    filter(year(Date_Time) == 2019 & month(Date_Time) == 7 & day(Date_Time) %in% c(2:3) &
+             !is.na(swell$swell_type)) %>%
+    ggplot(aes(x = Date_Time, y = WVHT)) +
+  geom_tile(data = swell %>%
+    filter(year(Date_Time) == 2019 & month(Date_Time) == 7 & day(Date_Time) %in% c(2:3) &
+             !is.na(swell$swell_type) & id == 46087), 
+            aes(x = g, y = 0.5, width = 12500, height = 0.05),
+            alpha = 0.1,
+            fill = 'bisque1',
+            color = 'orange2') +
+    geom_point(aes(color = dir,
+                   shape = swell_type),
+               alpha = 0.7,
+               size = 3) +
+    facet_grid(year(Date_Time) ~ id,
+               scales = 'free_x') +
+    scale_x_datetime(breaks = ,
+                     labels = label_date_short()) +
+  scale_color_hue(drop = FALSE) +
+  scale_shape(drop = FALSE) +
+    theme(legend.position = 'bottom') +
+    guides(color = guide_legend(override.aes = list(size = 5, alpha = 0.7))) +
+    labs(title = paste('Wave Height', 'for Neah Bay & New Dungeness'),
+         x = '',
+         y = 'Wave Height (m)',
+         color = 'Wave Direction',
+         shape = 'Swell Type',
+         caption = 'Color Indicates Wave Direction \n Shape Represents Swell Type')
+
+
+
+swell %>%
+    filter(year(Date_Time) == 2019 & month(Date_Time) == 7 & day(Date_Time) %in% c(2:3) ) %>%
+    ggplot(aes(x = Date_Time, y = WSPD)) +
+    geom_point(aes(color = w_dir),
+             size = 3,
+             alpha = 0.7) +
+  facet_grid(year(Date_Time) ~ id,
+               scales = 'free_x') +
+    scale_x_datetime(breaks = ,
+                     labels = label_date_short()) +
+  scale_color_hue(drop = FALSE) +
+    theme(legend.position = 'bottom') +
+    guides(color = guide_legend(override.aes = list(size = 5, alpha = 0.7))) +
+    labs(title = paste('Wind Speed', 'for Neah Bay & New Dungeness'),
+         x = '',
+         y = 'Wind Speed (m/s)',
+         color = 'Wind Direction',
+         caption = 'Color Indicates Wind Direction')
+
+
+```
+
+
+Notice the transition of NW windwaves on July 2nd, to the groundswell filling in on JUly 3rd at the Neah Bay Buoy.  Highlighted by the yellow box, we see there are a few observations of NW groundswell around 2am on the Neah Bay Buoy, with relatively calm winds for both locations on July 3rd.  Unfortunately there is no indication that these NW groundswell observations made it through the Strait.  Perhaps the relatively small wave height (about 0.5 meters) is a contributing factor.  
+
+Ultimately, I believe there is much potential in continuing to develop and explore this lag feature and I plan to revisit it in the future.  Additional components to consider include exploring wave height's relationship with the feature and groundswell observations at the New Dungeness Buoy, as well as, exploring the upper bounds of swell period observations at the Neah Bay Buoy and comparing them with groundswell readings at the New Dungeness Buoy.  I have a hunch that many extremely long period swell events do not make it all the way through the Strait.  For the upper end of the groundswell observations I believe there is likely a restrictive window of swell direction and period which allow for swell to travel through the Strait of Juan de Fuca.
+
+
+### Mapping New Dungeness Labels to Neah Bay Conditions:  Binning Method
+
+Given these considerations, I have choosen to move forward by averaging conditions at the Neah Bay Buoy.  For every observation of the label, swell type, at the New Dungeness Buoy I have averaged the conditions immediately preceeding it at the Neah Bay Buoy and assigned the label those conditions.  For groundswell and windswell observations, I have choosen to average the preceeding two hours worth of conditions, while for windwave, chop, and flat observations, I have choosen to average the preceeding four hours worth of conditions.
+
+Moving forward in Part 4.2, we will be working with this engineered, composite dataset to generate our supervised models.  It will be important to remeber what this data set represents:  for observed conditions of label class 'y' at the New Dungeness Buoy, the conditions immediately preceeding it at the Neah Bay Buoy resembled 'x'.
+

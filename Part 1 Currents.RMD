@@ -1,0 +1,415 @@
+---
+title: "Exploring Ocean Buoy Data"
+author: "Max Walker"
+date: "4/13/2020"
+output:
+  html_document:
+    df_print: kable
+subtitle: 'Part 1: Ocean Current Predictions vs Recorded Observations'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(dplyr)
+library(lubridate)
+library(knitr)
+library(rmarkdown)
+
+setwd('C:/Users/walke/Documents/Wave Project')
+
+```
+
+
+# Project Outline
+
+This report is Part 1 in a five part series in which we are exploring and analyzing ocean buoy data collected from NOAA maintained National Data Buoy Center (NDBC) stations.  In this report, we will be exploring and comparing predictions and recorded observations of water column movement, known as ocean current, at the West entrance to the Strait of Juan de Fuca near Neah Bay, Washington.  In **Part 2** we will take a look at meteorological (wind and wave) data from the Neah Bay Buoy and examine the potential for significant meteorological events to introduce noise in ocean current observations.  In **Part 3** we will introduce meteorological data for another location, NDBC Station 46088 (New Dungeness Buoy), and compare trends in wave height, period, and direction with those of the Neah Bay Buoy.  We will attempt to highlight the relationship between swell events at the Neah Bay Buoy and swell events at the New Dungeness Buoy.  In **Part 4** we will walk through considerations and processes involved in training and testing a supervised ML model to predict the class of wave which might occur at the New Dungeness Buoy given conditions at the Neah Bay Buoy.  In **Part 5** we will put our final classifier model in production by supplying forecasted conditions for the Neah Bay Station and determining the predicted class of wave observed at the New Dungeness Station.  
+
+More detailed information regarding the NDBC, and the locations of buoys they maintain, can be found on their [website](https://www.ndbc.noaa.gov/).  
+
+
+
+## Executive Summary: Part 1
+
+For **Part 1**, the objective is to become familiar with ocean current predictions and how they compare with recorded observations at the Neah Bay Buoy (NDBC Station 46087).  We begin with a basic visualization of daily, weekly, and monthly predictions.  Then we progress by overlaying ocean current observations.
+
+We notice instances where ocean current observations follow predictions almost identically, and other instances where observations seem erratic.  We conclude the visual exploration with a series of yearly plots of ocean current predictions and observations.
+
+
+## Data
+The data used originated from two separate sources: the observations were recorded by instrumentation attached to the NDBC Station id# 46087, while the predictions data were sourced from this website https://tides.mobilegeographics.com/locations/7867.html.  
+
+The recorded observation data was nicely formatted and available for download in yearly '.txt' files from the NDBC website https://www.ndbc.noaa.gov/station_history.php?station=46087.  I compiled these available observations into a single dataset ranging from year 2011 through 2019.  After cleaning and wrangling, here's a summary table and quick glimpse of the observation data:
+
+```{r observations, include=TRUE, echo=FALSE}
+setwd( "C:/Users/walke/Documents/Wave Project/Observed Currents NB")
+
+obs <- read.csv("currentObs_NB_11_19.csv")
+
+obs <- obs %>% select(id, date_time, cm_s, degT, dir, depth)
+
+#convert obs$date_time to POSIXct object with timezone in UTC/GMT
+obs$date_time <- as.character(obs$date_time)
+
+obs$date_time <- mdy_hm(obs$date_time)
+
+obs$date_time <- as.POSIXct(obs$date_time, tz = 'GMT')
+
+#set ebb to negative cm_s
+obs$cm_s[obs$dir == 'W'] <- obs$cm_s[obs$dir == 'W'] * -1
+```
+
+### Summary of Ocean Current Observation Data
+
+```{r include=TRUE, echo=FALSE}
+summary(obs)
+glimpse(obs)
+
+O <- obs %>% 
+  group_by(dir) %>%
+  summarise(meanDegT = mean(degT))
+
+kable(O,
+      row.names = FALSE,
+      col.names = c('Direction', 'Average Deg True'),
+      align = 'c',
+      caption = 'Summary Statistics')
+
+
+```
+
+The fields are relatively easy to understand, but we will walk through a denifition and description for each:
+
+- **id** refers to the NDBC station id, 46087.  the appendix '_o' indicates the entries are from the observations dataset.
+- **date_time** is the year, month, day, and time of the recorded observation.  Observations are recorded every 30 minutes continuously and stored in GMT/UTC timezone.  There are a fair amount of missing recordings in the data.
+- **cm_s** is the speed of the water column recorded in centimeters per second.  For the purposes of this exploration positive entries indicate flooding currents, or Easterly water column movement, and negative entries indicate ebbing currents, or Westerly water column movement.
+- **degT** is the direction in degrees true of the movement of the water column at the time of the observation.
+- **dir** is a feature I created using the data from degT, it denotes the direction of the water column at the time of the observation.  N indicates readings between *315* and *45*, E indicates readings between and including *45* and *135*, S indicates readings between *135* and *225*, and W indicates readings between and including *225* and *315*. 
+- **depth** is the depth of the recorded observation.  The instrument is set at 1.6 meters for this station.
+
+
+
+Historical currents prediction tables are not readily available.  Even NOAA only supplies current predictions going back two years from the present date, see NOAA tides and currents website here: https://tidesandcurrents.noaa.gov/stationhome.html?id=9443090.  To acquire prediction data going back as far as 2004 I had to source it from table objects on the tides.mobilegeographics website using Microsoft Excel's Power Query feature.  Since a nicely formatted text file was not apparently available, this process was arduous as it was necessary to transform the query to allow for proper rendering of the data.  In addition, I was only able to access one month at a time for each year from 2004 to 2021.  After pulling the prediction data from the internet through Excel, I compiled these predictions in R and performed fine-tuned cleaning and wrangling to create proper data types, clean up text, create dates and times with accurate timezones, and extrapolate astronomical data like moon phase for all prediction dates.  Here is a basic summary table and quick glimpse at the predictions data:
+
+```{r predictions, include=TRUE, echo=FALSE}
+
+setwd("C:/Users/walke/Documents/Wave Project/Current Predictions NB/Mobile Geographics Data")
+
+pred <- read.csv("currentPred_MG_NB_04_21.csv")
+
+pred <- pred %>% select(id, MoonPhase, Date_Time, Event, cm_s, degT, dir)
+
+#set ebb to negative cm_s
+pred$cm_s[pred$Event == "Ebb"] <- pred$cm_s[pred$Event == 'Ebb'] * -1
+
+# change pred$Date_Time to POSIXct object
+pred$Date_Time <- as.character(pred$Date_Time)
+
+pred$Date_Time <- ymd_hms(pred$Date_Time)
+
+pred$Date_Time <- as.POSIXct(pred$Date_Time, tz = 'GMT')
+
+```
+
+### Summary of Ocean Current Prediction Data
+
+```{r, include=TRUE, echo=FALSE}
+summary(pred)
+
+glimpse(pred)
+
+```
+
+Again many of the fields are straight forward, but we will walk through a definition and description for each:
+
+- **id** refers to the location.  The latitude and longitude for the NDBC station id 46087 were used to generate these prediction charts.  The appendix '_p' indicates the entries are from the predictions dataset.
+- **MoonPhase** indicates the phase of the moon for the given date.  'Full Moon' is when the moon is fully visible, 'New Moon' is when the moon is not visible at all.  Waning indicates that the amount of visible surface on the moon is shrinking.  Waxing indicates that the amount of visible surface on the moon is growing.  Crescent indicates that there is less than half of the moon visible.  Gibbous indicates that there is more than half of the moon visible.
+- **date_time** is the year, month, day, and time of the predicted event.  The times were acquired in PST/PDT and were translated to the GMT/UTC timezone.  Much effort was taken to verify an accurate translation.
+- **Event** indicates the type of event predicted to occur at the indicated date and time.  'Slack' refers to no water movement.  'Flood' refers to the maximum flood, or maximum Easterly water column movement.  'Ebb' refers to the maximum ebb, or maximum Westerly water column movement.
+- **cm_s** is the speed of the water column recorded in centimeters per second.  For the purposes of this exploration positive entries indicate flooding currents, or Easterly water column movement, and negative entries indicate ebbing currents, or Westerly water column movement.  The predictions data was originally pesented in nautical miles per hour, and cm/s were calculated using a factor of 51.444cms/knot.
+- **degT** is the direction in degrees true of the movement of the water column at the time of the observation.  The data source provided 115 as the mean direction for Flood events, and 290 as the mean direction for Ebb events.  Slack events were recorded with 'NA' for the degT field.
+- **dir** is a feature I created using the data from **degT**, it denotes the direction of the water column at the time of the observation.  'E' indicates readings of Flood events, 'W' indicates readings of Ebb events, and 'Slack' indicates Slack events. 
+
+
+## Explore with Visualizations
+
+First, let's explore the prediction data to get a better understanding of how it is organized.  Here we see predictions for a single day, March 19th, 2014:
+
+```{r predictions one day, include=TRUE, echo=FALSE}
+pred %>%
+  filter(year(Date_Time) == 2014 & month(Date_Time) == 3 & day(Date_Time) == 19 & Event %in% c('Flood', 'Ebb', 'Slack')) %>%
+  ggplot(aes(x = Date_Time, y = cm_s)) +
+  geom_point(alpha = 0.5, size = 2, color = 'red') +
+  geom_line(color = 'grey', size = 0.5, alpha = 0.5) +
+  geom_hline(yintercept = 0,
+             color = 'grey',
+             size = 2,
+             alpha = .7) +
+  scale_y_continuous(breaks = c(-75, -50, -25, 0, 25)) +
+  labs(title = "Predicted Current, Neah Bay ",
+       x = 'March 19th, 2014',
+       y = "Speed (cm/s)",
+      caption = "Positive Speed indicates flooding (E) currents, negative speed indicates ebbing (W) currents") 
+
+```
+
+
+Notice there are positive and negative speeds.  A mark in the positive region indiactes a peak flood event, or maximum East flowing current, while a mark in the negative region indicates a peak ebb event, or maximum West flowing current.  Predicted slack events are indicated with a mark at zero.
+
+Now let's zoom out for a weekly and monthly view of March 2014 (note that Slack Events have been removed):
+
+```{r predictions one Month, include=TRUE, echo=FALSE}
+#week
+pred %>%
+  filter(year(Date_Time) == 2014 & month(Date_Time) == 3 & day(Date_Time) %in% 5:12 & Event %in% c('Flood', 'Ebb')) %>%
+  ggplot(aes(x = Date_Time, y = cm_s)) +
+  geom_point(alpha = 0.5, size = 2, color = 'red') +
+  geom_line(color = 'grey', size = 0.5, alpha = 0.5) +
+  geom_hline(yintercept = 0,
+             color = 'grey',
+             size = 2,
+             alpha = .7) +
+  labs(title = "Predicted Current, Neah Bay ",
+       x = 'March 5th to 12th, 2014',
+       y = "Speed (cm/s)",
+      caption = "Predicted Slack Events Removed") 
+
+#month
+pred %>%
+  filter(year(Date_Time) == 2014 & month(Date_Time) == 3 & Event %in% c('Flood', 'Ebb')) %>%
+  ggplot(aes(x = Date_Time, y = cm_s)) +
+  geom_point(alpha = 0.5, size = 2, color = 'red') +
+  geom_line(color = 'grey', size = 0.5, alpha = 0.5) +
+  geom_hline(yintercept = 0,
+             color = 'grey',
+             size = 2,
+             alpha = .7) +
+  labs(title = "Predicted Current, Neah Bay ",
+       x = 'March 2014',
+       y = "Speed (cm/s)",
+      caption = "Predicted Slack Events Removed") 
+
+```
+
+
+Alright, now lets overlay data for the observed currents:
+
+```{r pred/obs March 2014, include=TRUE, echo=FALSE}
+
+#day march 19th
+pred %>%
+  filter(year(Date_Time) == 2014 & month(Date_Time) == 3 & day(Date_Time) == 19 & Event %in% c('Flood', 'Ebb', 'Slack')) %>%
+  ggplot(aes(x = Date_Time, y = cm_s)) +
+  geom_point(alpha = 0.5, size = 2, color = 'red') +
+  geom_line(color = 'grey', size = 0.5, alpha = 0.5) +
+  geom_hline(yintercept = 0,
+             color = 'grey',
+             size = 2,
+             alpha = .7) +
+  geom_point(data = obs %>%
+               filter(year(date_time) == 2014 & month(date_time) == 3 & day(date_time) == 19),
+             aes(x = date_time, y = cm_s),
+             alpha = 0.3,
+             size = 1,
+             color = 'blue') +
+  scale_y_continuous(breaks = c(-75, -50, -25, 0, 25)) +
+  labs(title = "Predicted & Observed Current, Neah Bay ",
+       subtitle = 'blue indicates observed, red indicates predicted',
+       x = 'March 19th, 2014',
+       y = "Speed (cm/s)",
+      caption = "Positive Speed indicates flooding (E) currents, negative speed indicates ebbing (W) currents") 
+
+#week march 15-22, 2014
+pred %>%
+  filter(year(Date_Time) == 2014 & month(Date_Time) == 3 & day(Date_Time) %in% 15:22 & Event %in% c('Flood', 'Ebb')) %>%
+  ggplot(aes(x = Date_Time, y = cm_s)) +
+  geom_point(alpha = 0.5, size = 2, color = 'red') +
+  geom_line(color = 'grey', size = 0.5, alpha = 0.5) +
+  geom_hline(yintercept = 0,
+             color = 'grey',
+             size = 2,
+             alpha = .7) +
+  geom_point(data = obs %>%
+               filter(year(date_time) == 2014 & month(date_time) == 3 & day(date_time) %in% 15:22),
+             aes(x = date_time, y = cm_s),
+             alpha = 0.3,
+             size = 1,
+             color = 'blue') +
+  labs(title = "Predicted & Observed Current, Neah Bay ",
+       subtitle = 'blue indicates observed, red indicates predicted',
+       x = 'March 15th to 22nd, 2014',
+       y = "Speed (cm/s)",
+       caption = "Predicted Slack Events Removed") 
+
+#month march 2014
+pred %>%
+  filter(year(Date_Time) == 2014 & month(Date_Time) == 3 & Event %in% c('Flood', 'Ebb')) %>%
+  ggplot(aes(x = Date_Time, y = cm_s)) +
+  geom_point(alpha = 0.5, size = 2, color = 'red') +
+  geom_line(color = 'grey', size = 0.5, alpha = 0.5) +
+  geom_hline(yintercept = 0,
+             color = 'grey',
+             size = 2,
+             alpha = .7) +
+  geom_point(data = obs %>%
+               filter(year(date_time) == 2014 & month(date_time) == 3),
+             aes(x = date_time, y = cm_s),
+             alpha = 0.3,
+             size = 1,
+             color = 'blue') +
+  labs(title = "Predicted & Observed Current, Neah Bay ",
+       subtitle = 'blue indicates observed, red indicates predicted',
+       x = 'March 2014',
+       y = "Speed (cm/s)",
+       caption = "Predicted Slack Events Removed") 
+
+
+```
+
+
+It appears that at times the observations follow the predictions well, while at other times the observations are way outside of the prediction range skewed in the positive direction.  Also, what is happening around March 10th?  Why are some of the flood events predicted to be negative?  They are not,  there are simply three ebb events those days.
+
+Let's take a closer look around March 10th, 2014:
+
+```{r march 10th, include=TRUE, echo=FALSE}
+#day march 9-11th
+pred %>%
+  filter(year(Date_Time) == 2014 & month(Date_Time) == 3 & day(Date_Time) %in% 9:11 & Event %in% c('Flood', 'Ebb', 'Slack')) %>%
+  ggplot(aes(x = Date_Time, y = cm_s)) +
+  geom_point(alpha = 0.5, size = 2, color = 'red') +
+  geom_line(color = 'grey', size = 0.5, alpha = 0.5) +
+  geom_hline(yintercept = 0,
+             color = 'grey',
+             size = 2,
+             alpha = .7) +
+  geom_point(data = obs %>%
+               filter(year(date_time) == 2014 & month(date_time) == 3 & day(date_time) %in% 9:11),
+             aes(x = date_time, y = cm_s),
+             alpha = 0.3,
+             size = 1,
+             color = 'blue') +
+  labs(title = "Predicted & Observed Current, Neah Bay ",
+       subtitle = 'blue indicates observed, red indicates predicted',
+       x = 'March 9th to 11th, 2014',
+       y = "Speed (cm/s)",
+      caption = "Positive Speed indicates flooding (E) currents, negative speed indicates ebbing (W) currents") 
+
+
+
+```
+
+
+Now let's look at each month of the year for 2014:
+
+```{r year 2014 monthly, include=TRUE, echo=FALSE}
+#create function 
+pred_vs_obs <- function(month, year){
+  for (i in year) {
+    for (m in month) {
+      p <- pred %>%
+        filter(year(Date_Time) == i & month(Date_Time) == m &  Event %in% c('Flood', 'Ebb')) %>%
+        ggplot(aes(x = Date_Time, y = cm_s)) +
+        geom_point(alpha = 0.5, size = 2, color = 'red') +
+        geom_line(color = 'grey', size = 0.5, alpha = 0.5) +
+        geom_hline(yintercept = 0,
+                   color = 'grey',
+                   size = 2,
+                   alpha = .7) +
+        geom_point(data = obs %>%
+                     filter(year(date_time) == i & month(date_time) == m),
+                   aes(x = date_time, y = cm_s),
+                   alpha = 0.2,
+                   size = 1,
+                   color = 'blue') +
+        labs(title = "Predicted & Observed Current, Neah Bay ",
+             subtitle = 'blue indicates observed, red indicates predicted',
+             x = i,
+             y = "Speed (cm/s)",
+             caption = 'Predicted Slack Events Removed')
+      
+      print(p)
+    }
+  }
+}
+
+#all months 2014
+months <- 1:12
+
+pred_vs_obs(months, year = 2014)
+
+```
+
+
+My initial observation is that Ebb Events are generally predicted to be stronger than Flood Events.  Ebb Events are regularly predicted to be in the -100 cm/s range, while Flood Events are regularly in the 50 cm/s range.
+
+The June, July, and August observations are almost exactly aligned with the predictions, while the second half of September through December all show observations which are much smaller than predicted and differently organized. Perhaps seasonal storm activity have an affect on the instrument's readings, and an attempt was made to correct for this interference leading to these 'supressed' observation values.  I can imagine a 15ft+ swell introducing some variation in the current reading as the buoy is being lifted and dropped through the peak and trough of the swell.  The NDBC's website does not describe the method by which it determines the reading at a given time (whether it is an average over a period, whether they attempt to correct for strong swell or wind affects, etc.), but more information regarding their data descriptions and measurement techniques can be found on this webpage: https://www.ndbc.noaa.gov/measdes.shtml.  It would also be relevant to compare these dates with swell data, which we will do in part 2 of this project.
+
+
+Next, let's look at yearly sequences to see if any seasonal trends become apparent.  This will also highlight our missing observation data.  Here are graphs for years 2011 to 2019:
+
+```{r years 2011 to 2019, include=TRUE, echo=FALSE}
+years <- 2011:2019
+
+for (i in years) {
+  p <- pred %>%
+    filter(year(Date_Time) == i &  Event %in% c('Flood', 'Ebb')) %>%
+    ggplot(aes(x = Date_Time, y = cm_s)) +
+    geom_point(alpha = 0.3, size = 2, color = 'red') +
+    geom_line(color = 'grey', size = 0.5, alpha = 0.5) +
+    geom_hline(yintercept = 0,
+                   color = 'grey',
+                   size = 2,
+                   alpha = .7) +
+    geom_point(data = obs %>%
+                 filter(year(date_time) == i),
+               aes(x = date_time, y = cm_s),
+               alpha = 0.1,
+               size = 1,
+               color = 'blue') +
+    labs(title = "Predicted & Observed Current, Neah Bay ",
+         subtitle = 'blue indicates observed, red indicates predicted',
+         x = NULL,
+         caption = 'Predicted Slack Events Removed')
+  
+  print(p)
+}
+
+```
+
+
+Very cool, there is a lot going on here.  Late 2018 and most of the 2019 data look to be noisy.  I'm not sure why it appears to be so different than the previous years' data.  Maybe an insturment malfunctioned, barnacle growth or seaweed got caught in the instrument, or maintenance was performed which altered the readings, or perhaps there was an issue in data transmission and the values were encoded or un-encoded inaccurately.  
+
+I notice a couple periods in the timeline where the observations seem to be compressed, during the Winter of 2014 through Spring of 2015 and also from July to October of 2016.  In part 2, we will explore wave data and compare the timelines of these trends to see if there are any patterns which align along these periods.
+
+Other patterns I took note of include the presence of periods where the observed flood seems to be stronger in general than the observed ebb, followed by periods where the ebb seems to be stronger than the flood.  For example, look at the graph of 2014.  Moving sequentially starting at the first of the year, there is a 'spike' in the negative direction followed by a 'spike' in the positive direction.  This pattern of 'offset spikes' repeats itself with some ambiguity through June 2014. Here is a closer look:
+
+```{r year 2014 moonphase, include=TRUE, echo=FALSE}
+
+#year jan to june 2014, moonphase overlay
+pred %>%
+    filter(year(Date_Time) == 2014 & month(Date_Time) %in% 1:6 & Event %in% c('Flood', 'Ebb')) %>%
+    ggplot(aes(x = Date_Time, y = cm_s)) +
+    geom_point(alpha = 0.5, size = 2, color = 'red') +
+    geom_line(color = 'grey', size = 2, alpha = 0.5) +
+    geom_point(data = obs %>%
+                 filter(year(date_time) == 2014 & month(date_time) %in% 1:6),
+               aes(x = date_time, y = cm_s),
+               alpha = 0.1,
+               size = 1,
+               color = 'blue') +
+    labs(title = "Predicted & Observed Current, Neah Bay ",
+         subtitle = 'blue indicates observed, red indicates predicted',
+         x = NULL,
+         caption = 'Predicted Slack Events Removed')
+```
+
+
+
+## Summary, Next Steps, and the Bigger Picture
+
+As we have seen observations of ocean currents recorded at the NDBC Station 46087 are erratic.  Sometimes they align almost identically with predicted currents while at other times observations are off the charts, or severly suppressed.  I believe other meteorological factors come into play and have an affect on the observed ocean current.  
+
+In part 2 of this project we will explore and visualize characteristics of features such as wave, wind, and atmospheric pressure from recorded observations at the NDBC Station 46087.  In addition we will compare timeseries of these features with noted timeseries of interest in part 1. In part 3 of this project we will dive into bouy data from the NDBC Station 46088, also known as the New Dungeness Buoy.  The intention will be to compare data from Station 46087 with data from 46088 to determine a list of dates where swell was recorded passing through the Strait.  It will be necessary to set thresholds for wind speed to filter out strong North West wind events which cause local windswell, and I'm sure many more challenges and considerations will present themselves.
+
+My goal in pursuing this project *Exploring Ocean Buoy Data*, is to validate data and gain a better understanding of relationships among features in an attempt to train and develop a supervised machine learning model to predict the class of swell in the Strait of Juan de Fuca.  This will be a complex and multifaceted task, with ample consideration required before sound model development can begin.  My intentions in pursuing this endeavour are to produce a model which will be deployable by providing a set of forecasted conditions at the Neah Bay Buoy (swell size/period/direction, wind speed/direction, tides/current predictions, date, etc) and producing a prediction for the class of wave which will occur at the New Dungeness Buoy.  
+

@@ -1,0 +1,767 @@
+---
+title: "Exploring Ocean Buoy Data"
+author: "Max Walker"
+date: "4/27/2020"
+output:
+  html_document:
+    df_print: kable
+subtitle: 'Part 3: Comparing Neah Bay and New Dungeness'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(tidyverse)
+library(dplyr)
+library(lubridate)
+library(knitr)
+library(rmarkdown)
+library(gridExtra)
+library(ggpubr)
+library(kableExtra)
+library(formattable)
+library(scales)
+
+setwd('C:/Users/walke/Documents/Wave Project')
+
+```
+
+
+```{r load data, include=TRUE}
+#set working directory
+setwd("C:/Users/walke/Documents/Wave Project/Waves ND/historical data")
+
+#load data 46088
+data_ND <- read.csv('historical_46088_04_19.csv')
+
+#create swell
+data_ND <- data_ND %>% select(id, Date_Time, WVHT, MWD, dir, swell_type, DPD, APD, WDIR, w_dir, WSPD, GST, PRES, ATMP, WTMP)
+
+
+#load data 46087
+data_NB <- read.csv(file = 'C:/Users/walke/Documents/Wave Project/Waves NB/Historical Wave Data/historical_46087_04_19.csv')
+
+data_NB <- data_NB %>% select(id, Date_Time, WVHT, MWD, dir, swell_type, DPD, APD, WDIR, w_dir, WSPD, GST, PRES, ATMP, WTMP)
+
+
+# create swell with row bind of the two datasets 
+swell <- rbind(data_ND, data_NB)
+
+#change to factors
+swell$id <- as.factor(swell$id)
+
+#reorder factors
+swell$swell_type <- factor(swell$swell_type, levels = c('groundswell', 'windswell', 'windwave', 'chop', 'flat'))
+
+#change dir and w_dir levels to be in order clockwise starting at E
+
+levels_E <- c('E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW', 'N', 'NNE', 'NE', 'ENE')
+
+levels_N <- c('N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW')
+
+swell$dir <- factor(swell$dir, levels = levels_E)
+
+swell$w_dir <- factor(swell$w_dir, levels = levels_E)
+
+
+#change Date_Time to POSIXct timezone = 'GMT'
+swell$Date_Time <- ymd_hms(swell$Date_Time)
+swell$Date_Time <- as.POSIXct(swell$Date_Time, tz = 'GMT')
+
+```
+
+
+
+
+# Project Outline 
+
+  
+This report is Part 3 in a five part series in which we are exploring and analyzing ocean buoy data collected from NOAA maintained National Data Buoy Center (NDBC) stations.  In **Part 1** we explored ocean current observations at the NDBC Station 46087 (Neah Bay Buoy) and compared them with ocean current forecasts from a third party.  In **Part 2** we took a look at meteorological (wind and wave) data from the Neah Bay Buoy and examined the potential for significant meteorological events to introduce noise in ocean current observations.  Here in **Part 3** we will introduce meteorological data for another location, NDBC Station 46088 (New Dungeness Buoy), and compare trends in wave height, period, and direction with those of the Neah Bay Buoy.  We will attempt to highlight the relationship between swell events at the Neah Bay Buoy and swell events at the New Dungeness Buoy.  In **Part 4** we will walk through considerations and processes involved in training and testing a supervised ML model to predict the class of wave which might occur at the New Dungeness Buoy given conditions at the Neah Bay Buoy.  In **Part 5** we will put our final classifier model in production by supplying forecasted conditions for the Neah Bay Station and determining the predicted class of wave observed at the New Dungeness Station.  
+
+More detailed information regarding the NDBC, and the locations of buoys they maintain, can be found on their [website](https://www.ndbc.noaa.gov/).  
+
+
+
+## Executive Summary: Part 3
+
+In this report we examine trends in relationships between meteorological observations at the Neah Bay and New Dungeness NDBC Stations.  We compare summary statistics for monthly and yearly aggregated observations, noting an overall smaller wave size, as well as an increase in summer-time wave heights at the New Dungeness Buoy when compared with the Neah Bay Buoy.
+
+Next we focus on conditions at the New Dungeness Buoy, exploring the distribution of wave height observations faceted by swell type.  We notice a seasonality to the groundswell and windswell activity, which as we recall is consistent with trends at the Neah Bay Buoy.  
+
+Then we look at the relationships between wave height and wave direction at the New Dungeness Buoy, faceted by swell type.  We notice a common vein of wave direction from the SW and WSW directions.  In addition, we notice windwave and chop swell types also show clustering from the ESE direction.  We compare these wave characteristics with wind characteristics faceted along the same swell types, and notice the potential for strong correlation between local wind events and windwave and chop swell types.
+
+Finally, we explore time series plots of wave heights at both NDBC Stations and see evidence of relationship between strong swell events at the Neah Bay Buoy and observations of groundswell at the New Dungeness Buoy.  We drill down into the data to examine two specific swell events and further explore the potential for local wind events at the New Dungeness Buoy to 'mask' underlying groundswell conditions.
+
+
+## Data   
+
+The data used in this report was acquired through the NDBC [website](https://www.ndbc.noaa.gov/).  Nicely formatted, yearly '.txt' files are available for download for years 2004 to 2019, and some wrangling is necesseray.  Issues regarding data quality include:  the addition of the minute of observation column in 2005, a re-assignment of variable names beginning in 2007, several shifts in the frequency of recorded observations, as well as a considerable number of missing observations.  After dealing with these data quality issues, I choose to engineer several new features including: *id*, *dir*, *w_dir*, and *swell_type*.  Further definitions and descriptions for each field in the dataset can be found in the appendix of this report and on the NDBC's [measurement definitions](https://www.ndbc.noaa.gov/measdes.shtml) webpage.
+
+
+## Summary Statistics
+
+Here let's explore aggregated information for both stations. 
+
+First, the New Dungeness Buoy:
+
+
+```{r summary month 46088, include=TRUE}
+# by month
+summaryMONTH_ND <- swell %>% 
+  filter(id == 46088) %>%
+  group_by(month(Date_Time)) %>%
+  summarise(n = n(),
+            mean_wvdir = mean(MWD, na.rm = TRUE),
+            mean_wvht = mean(WVHT, na.rm = TRUE),
+            mean_AvgPeriod = mean(APD, na.rm = TRUE),
+            mean_DomPeriod = mean(DPD, na.rm = TRUE),
+            mean_wind_dir = mean(WDIR, na.rm = TRUE),
+            mean_wind_speed = mean(WSPD, na.rm = TRUE),
+            mean_pres = mean(PRES, na.rm = TRUE),
+            mean_atmp = mean(ATMP, na.rm = TRUE),
+            mean_wtmp = mean(WTMP, na.rm = TRUE))
+
+#table / kable object for month
+kable(summaryMONTH_ND %>% 
+        mutate(n = color_tile('light green', 'green')(n)),
+      row.names = FALSE,
+      col.names = c('Month', 'Number of Observations', 'Mean Wave Dir', 'Mean Wave Height', 'Mean APD', 'Mean DPD',
+                    'Mean Wind Dir', 'Mean WSPD', 'Mean PRES', 'Mean ATMP', 'Mean WTMP'),
+      align = 'c',
+      caption = 'Summary Statistics for all Months, NDBC Station 46088',
+      escape = FALSE,
+      digits = 2) %>%
+  column_spec(1:2, bold = TRUE, color = 'black') %>%
+  kable_styling(full_width = FALSE)
+
+```
+
+
+
+
+```{r summary yar 46088,  include=TRUE}
+# by year
+summaryYEAR_ND <- swell %>% 
+  filter(id == 46088) %>%
+  group_by(year(Date_Time)) %>%
+  summarise(n = n(),
+            mean_wvdir = mean(MWD, na.rm = TRUE),
+            mean_wvht = mean(WVHT, na.rm = TRUE),
+            mean_AvgPeriod = mean(APD, na.rm = TRUE),
+            mean_DomPeriod = mean(DPD, na.rm = TRUE),
+            mean_wind_dir = mean(WDIR, na.rm = TRUE),
+            mean_wind_speed = mean(WSPD, na.rm = TRUE),
+            mean_pres = mean(PRES, na.rm = TRUE),
+            mean_atmp = mean(ATMP, na.rm = TRUE),
+            mean_wtmp = mean(WTMP, na.rm = TRUE))
+
+#table/kable object
+kable(summaryYEAR_ND %>%  
+        mutate(n = color_tile('yellow', 'green')(n)),
+      row.names = FALSE,
+      col.names = c('Year', 'Number of Observations', 'Mean Wave Dir', 'Mean Wave Height', 'Mean APD', 'Mean DPD',
+                    'Mean Wind Dir', 'Mean WSPD', 'Mean PRES', 'Mean ATMP', 'Mean WTMP'),
+      align = 'c',
+      caption = 'Summary Statistics for All Years, NDBC Station 46088',
+      escape = FALSE,
+      digits = 2) %>%
+  column_spec(1:2, bold = TRUE, color = 'black') %>%
+  kable_styling(full_width = FALSE)
+
+
+```
+
+
+
+And recall these statistics for the Neah Bay Buoy:
+
+
+```{r summary month 46087, include=TRUE}
+# by month
+summaryMONTH_NB <- swell %>% 
+  filter(id == 46087) %>%
+  group_by(month(Date_Time)) %>%
+  summarise(n = n(),
+            mean_wvdir = mean(MWD, na.rm = TRUE),
+            mean_wvht = mean(WVHT, na.rm = TRUE),
+            mean_AvgPeriod = mean(APD, na.rm = TRUE),
+            mean_DomPeriod = mean(DPD, na.rm = TRUE),
+            mean_wind_dir = mean(WDIR, na.rm = TRUE),
+            mean_wind_speed = mean(WSPD, na.rm = TRUE),
+            mean_pres = mean(PRES, na.rm = TRUE),
+            mean_atmp = mean(ATMP, na.rm = TRUE),
+            mean_wtmp = mean(WTMP, na.rm = TRUE))
+
+#table / kable object for month
+kable(summaryMONTH_NB %>%
+        mutate(n = color_tile('light green', 'green')(n)),
+      row.names = FALSE,
+      col.names = c('Month', 'Number of Observations', 'Mean Wave Dir', 'Mean Wave Height', 'Mean APD', 'Mean DPD',
+                    'Mean Wind Dir', 'Mean WSPD', 'Mean PRES', 'Mean ATMP', 'Mean WTMP'),
+      align = 'c',
+      caption = 'Summary Statistics for all Months, NDBC Station 46087',
+      escape = FALSE,
+      digits = 2) %>%
+  column_spec(1:2, bold = TRUE, color = 'black') %>%
+  kable_styling(full_width = FALSE)
+
+```
+
+
+
+
+```{r summary year 46087,  include=TRUE}
+# by year
+summaryYEAR_NB<- swell %>% 
+  filter(id == 46087) %>%
+  group_by(year(Date_Time)) %>%
+  summarise(n = n(),
+            mean_wvdir = mean(MWD, na.rm = TRUE),
+            mean_wvht = mean(WVHT, na.rm = TRUE),
+            mean_AvgPeriod = mean(APD, na.rm = TRUE),
+            mean_DomPeriod = mean(DPD, na.rm = TRUE),
+            mean_wind_dir = mean(WDIR, na.rm = TRUE),
+            mean_wind_speed = mean(WSPD, na.rm = TRUE),
+            mean_pres = mean(PRES, na.rm = TRUE),
+            mean_atmp = mean(ATMP, na.rm = TRUE),
+            mean_wtmp = mean(WTMP, na.rm = TRUE))
+
+#table/kable object
+kable(summaryYEAR_NB%>%
+        mutate(n = color_tile('yellow', 'green')(n)),
+      row.names = FALSE,
+      col.names = c('Year', 'Number of Observations', 'Mean Wave Dir', 'Mean Wave Height', 'Mean APD', 'Mean DPD',
+                    'Mean Wind Dir', 'Mean WSPD', 'Mean PRES', 'Mean ATMP', 'Mean WTMP'),
+      align = 'c',
+      caption = 'Summary Statistics for All Years, NDBC Station 46087',
+      escape = FALSE,
+      digits = 2) %>%
+  column_spec(1:2, bold = TRUE, color = 'black') %>%
+  kable_styling(full_width = FALSE)
+
+
+```
+
+
+Let's use data visualization techniques to help us better understand monthly trends.
+
+
+```{r monthly agg plot waves 46088, include=TRUE, fig.width=10, fig.height=8, warning=FALSE}
+#mean_wvht monthly    I LIKE THIS ONE
+summaryMONTH <- swell %>%
+  group_by(month(Date_Time), id) %>%
+  summarise(n = n(),
+            mean_wvdir = mean(MWD, na.rm = TRUE),
+            mean_wvht = mean(WVHT, na.rm = TRUE),
+            mean_AvgPeriod = mean(APD, na.rm = TRUE),
+            mean_DomPeriod = mean(DPD, na.rm = TRUE),
+            mean_wind_dir = mean(WDIR, na.rm = TRUE),
+            mean_wind_speed = mean(WSPD, na.rm = TRUE),
+            mean_pres = mean(PRES, na.rm = TRUE),
+            mean_atmp = mean(ATMP, na.rm = TRUE),
+            mean_wtmp = mean(WTMP, na.rm = TRUE))
+
+
+
+
+summaryMONTH %>%
+  ggplot(aes(x = reorder(as.factor(month.abb[.[[1]]]), 1:24), y = mean_wvht)) +
+  geom_point(alpha = 0.7,
+             aes(size = mean_DomPeriod,
+                 color = mean_wvdir),
+             show.legend = TRUE) +
+  facet_wrap(~id, scales = 'free_x') +
+  scale_size(range = c(10, 18)) +
+  scale_y_continuous(expand = expansion(.2)) +
+  coord_flip() +
+  labs(title = 'Monthly Average Wave Heights',
+       subtitle = 'Aggregated for all data 2004 to 2019',
+       y = 'Mean Wave Height (m)',
+       x = 'Month',
+       color = 'Mean Wave Direction (degT)',
+       size = 'Mean Dominant Period') 
+  
+
+```
+
+
+As we can see, the aggregated monthly averages differ considerably between the two stations.  There are similarities in seasonal trends, with the exception of a notable spike in average wave heights during the summer months at the New Dungeness Buoy.  As we will explore in more detail later in this report, wave heights and directions are strongly correllated with 'local' wind conditions at the New Dungeness Buoy.
+
+
+Let's quickly examine yearly aggregations for both stations:
+
+```{r yearly agg plot waves, include=TRUE, fig.width=10, fig.height=8, warning=FALSE}
+#mean_wvht monthly    I LIKE THIS ONE
+
+summaryYEAR <- swell %>%
+  group_by(year(Date_Time), id) %>%
+  summarise(n = n(),
+            mean_wvdir = mean(MWD, na.rm = TRUE),
+            mean_wvht = mean(WVHT, na.rm = TRUE),
+            mean_AvgPeriod = mean(APD, na.rm = TRUE),
+            mean_DomPeriod = mean(DPD, na.rm = TRUE),
+            mean_wind_dir = mean(WDIR, na.rm = TRUE),
+            mean_wind_speed = mean(WSPD, na.rm = TRUE),
+            mean_pres = mean(PRES, na.rm = TRUE),
+            mean_atmp = mean(ATMP, na.rm = TRUE),
+            mean_wtmp = mean(WTMP, na.rm = TRUE))
+
+
+anno <- tibble(x1 = c(mean(summaryYEAR_NB$mean_wvht), mean(summaryYEAR_ND$mean_wvht)),
+               id = c(46087, 46088))
+
+anno$id <- as.factor(anno$id)
+
+summaryYEAR %>%
+  ggplot(aes(x = as.factor(.[[1]]), 
+             y = mean_wvht)) +
+  geom_point(alpha = 0.7,
+             aes(size = mean_DomPeriod,
+                 color = mean_wvdir),
+             show.legend = TRUE) +
+  facet_wrap(~id, scales = 'free_x') +
+  geom_hline(data = anno,
+             aes(yintercept = anno$x1),
+             color = 'palevioletred',
+             size = 3,
+             alpha = 0.5) +
+  scale_size(range = c(10, 18)) +
+  scale_y_continuous(expand = expansion(.2)) +
+  scale_x_discrete(expand = expansion(.065)) +
+  coord_flip() +
+  labs(title = 'Yearly Average Wave Heights',
+       subtitle = '2004 to 2019',
+       x = 'Year',
+       y = 'Mean Wave Height (m)',
+       color = 'Mean Wave Direction (degT)',
+       size = 'Mean Dominant Period',
+       caption = paste('red line indicates overall average\n', 'Neah Bay Average:', round(anno$x1[1], 2),'m\n',
+                       'New Dungeness Average:', round(anno$x1[2], 2), 'm'))
+
+
+```
+
+
+
+
+
+
+
+##  Explore Distributions and Feature Relationships
+
+Moving forward in our analysis we will be paying attention to wave size and period.  The periods have been classified into five distinct groupings: *groundswell*, *windswell*, *windwave*, *chop*, and *flat*, corresponding to periods 13 seconds and greater, between 10 and 12 seconds, between 5 and 9 seconds, less than 4 seconds, and zero seconds with zero wave height.  
+
+Let's start with a look at the distribution of wave height for the New Dungeness Buoy: 
+
+```{r wave dist1 46088, include=TRUE, fig.width=10, fig.height=8, warning=FALSE}
+#  lets look at the distribution of wave height for 46088
+swell %>% 
+  filter(id == 46088) %>%
+  ggplot(aes(x = WVHT)) +
+  geom_histogram(aes(),
+                 color = 'black',
+                 alpha = 0.7, 
+                 position = ,
+                 binwidth = .1) +
+  labs(title = 'Distribution of Wave Height',
+       subtitle = 'NDBC Sation 46088',
+       x = 'Wave Height (m)',
+       y = 'Number of Observations',
+       fill = "Swell Type",
+       caption = 'Data for 2004-2019') +
+  theme(plot.caption.position = 'panel',
+        legend.position = 'bottom')
+
+
+```
+
+
+We can see the majority of observations are clustered at 0, and near 0.25 meters in height.  
+
+Let's see how swell types play into this distribution:
+
+
+```{r wave dist2 46088, include=TRUE, fig.width=10, fig.height=8, warning=FALSE}
+#lets see what swell types look like within this distribution
+swell %>% 
+  filter(id == 46088) %>%
+  ggplot(aes(x = WVHT)) +
+  geom_histogram(aes(fill = swell_type),
+                 color = 'black',
+                 alpha = 0.7, 
+                 position = ,
+                 binwidth = .1) +
+  labs(title = 'Distribution of Wave Height',
+       subtitle = 'NDBC Sation 46088',
+       x = 'Wave Height (m)',
+       y = 'Number of Observations',
+       fill = "Swell Type",
+       caption = 'Data for 2004-2019') +
+  theme(plot.caption.position = 'panel',
+        legend.position = 'bottom')
+
+```
+
+
+Chop appears to be the largest class followed by flat, windwave, windswell, then groundswell.
+
+Let's take a look at monthly distributions to see if any seasonal trends are apparent:
+
+
+```{r wave dist3 46088, include=TRUE, fig.width=10, fig.height=8, warning=FALSE}
+#and now facet by month
+swell %>% 
+  filter(id == 46088 & swell_type %in% c('groundswell', 'windswell', 'windwave', 'chop', 'flat')) %>%
+  ggplot(aes(x = WVHT)) +
+  geom_histogram(aes(fill = swell_type),
+                 alpha = 0.7,
+                 color = 'black',
+                 position = ,
+                 binwidth = .1) + 
+  facet_wrap(~ factor(month.name[month(Date_Time)], levels = month.name), ncol = 3) +
+  labs(title = 'Distribution of Wave Height',
+       subtitle = 'NDBC Sation 46088',
+       x = 'Wave Height (m)',
+       y = 'Number of Observations',
+       fill = "Swell Type",
+       caption = 'Data for 2004-2019 \nFaceted by Month') +
+  theme(plot.caption.position = 'panel',
+        legend.position = 'bottom')
+
+
+```
+
+
+Now let's filter out flat, chop, and windswell to examine the monthly distributions of the under-represented classes:
+
+
+```{r wave dist4 46088, include=TRUE, fig.width=10, fig.height=8, warning=FALSE}
+# Wind waves dominate the observations. as surfers we are usually not that interested in windwaves, as 
+# they are typically associated with local windy/stormy conditions. Not all months have groundswell,
+# and it appears that the months with the fewest number of
+# groundswell observations have the largest number of windwave observations: june, july, aug.
+# let's filter out windwaves and re-examine this distribution
+
+#we are not that interested in windwave, filter out windwave 
+swell %>% 
+  filter(id == 46088 & swell_type %in% c('groundswell', 'windswell'))%>%
+  ggplot(aes(x = WVHT)) +
+  geom_histogram(aes(fill = swell_type),
+                 alpha = 0.7,
+                 color = 'black',
+                 binwidth = .1) +
+  scale_fill_discrete(drop = FALSE) +
+  facet_wrap (~ factor(month.name[month(Date_Time)], levels = month.name), ncol = 3) +
+  labs(title = 'Distribution of Wave Height',
+       subtitle = 'NDBC Sation 46088',
+       x = 'Wave Height (m)',
+       y = 'Number of Observations',
+       fill = "Swell Type",
+       caption = 'Data for 2004-2019 \nFaceted by Month \nWindwave, Chop, and Flat Removed') +
+  theme(plot.caption.position = 'panel',
+        legend.position = 'bottom')
+
+```
+
+
+It's easy to see that summer months have far fewer groundswell and windswell observations, while winter months have more.
+
+Let's move on by examining the relationship between Wave Height and Mean Wave Direction at the New Dungeness Buoy:
+
+
+```{r wave height vs MWD 1 46088, include=TRUE, fig.width=10, fig.height=8, warning=FALSE}
+#wvht vs MWD faceted by swell type
+swell %>%
+  filter(id == 46088 & swell_type %in% c('groundswell', 'windswell', 'windwave', 'chop')) %>%
+  ggplot(aes(x = MWD, y = WVHT, color = swell_type)) +
+  geom_jitter(alpha = 0.2) +
+  scale_x_continuous(breaks =seq(0, 360, length.out = 16), labels = levels_N) +
+  labs(title = "Wave Height vs Mean Wave Direction",
+       subtitle = 'NDBC Station 46088',
+       x = 'Mean Wave Direction',
+       y = 'Wave Height (m)',
+       color = 'Swell Type',
+       caption = 'Data for 2004-2019') +
+  guides(color = guide_legend(override.aes = aes(size = 4, alpha = .7))) +
+  theme(legend.position = 'bottom')
+
+```
+
+
+Again, it's easy to see the trends in wave height and wave direction with chop and windwaves, but what about the classes with fewer observations?
+
+Let's facet on swell type to find out:
+
+
+```{r wave height vs MWD 2 46088, include=TRUE, fig.width=10, fig.height=8, warning=FALSE}
+#wvht vs MWD faceted by swell type
+swell %>%
+  filter(id == 46088 & swell_type %in% c('groundswell', 'windswell', 'windwave', 'chop')) %>%
+  ggplot(aes(x = MWD, y = WVHT, color = swell_type)) +
+  geom_jitter(alpha = 0.2) +
+  scale_x_continuous(breaks =seq(0, 360, length.out = 16), labels = levels_N) +
+  facet_wrap(~swell_type, ncol = 1) +
+  labs(title = "Wave Height vs Mean Wave Direction",
+       subtitle = 'NDBC Station 46088',
+       x = 'Mean Wave Direction',
+       y = 'Wave Height (m)',
+       color = 'Swell Type',
+       caption = 'Data for 2004-2019 \nFaceted by Swell Type') +
+  guides(color = guide_legend(override.aes = aes(size = 4, alpha = .7))) +
+  theme(legend.position = 'bottom')
+
+```
+
+
+All four swell types have a clustering around the SW/WSW directions, while windwave and chop have additional clusters around the ESE direction.
+
+Now lets have a look at the wind data for the New Dungeness Buoy to see if there are any apparent relationships with the wave data.
+
+```{r winds1 46088, include=TRUE, fig.width=10, fig.height=8, warning=FALSE}
+
+#wind speed vs wind direction
+swell %>%
+  filter(id == 46088 & swell_type %in% c('groundswell', 'windswell', 'windwave', 'chop'))  %>%
+  ggplot(aes(x = WDIR, y = WSPD)) +
+  geom_jitter(alpha = 0.2,
+              aes(color = swell_type)) +
+    facet_wrap(~swell_type, ncol = 1) +
+  scale_x_continuous(breaks =seq(0, 360, length.out = 16), labels = levels_N) +
+  labs(title = "Wind Speed vs Wind Direction",
+       subtitle = 'NDBC Station 46088 \nFaceted by Swell Type',
+       x = 'Wind Direction',
+       y = 'Wind Speed (m/s)',
+       color = 'Swell Type',
+       caption = 'Data for 2004-2019 \nFaceted by Swell Type') +
+  guides(color = guide_legend(override.aes = aes(size = 4, alpha = .7))) +
+  theme(legend.position = 'bottom')
+
+```
+
+
+This can be a tricky transition to comprehend, but we are looking at wind speeds vs wind directions, faceted on the wave type for the given wind observations.  In comparison to the previous plot, we see parallell structure in the windwave and chop facets.  This implies correlation between local wind conditions and the windwave and chop classes.  In comparison to the previous plot, the groundswell and windswell facets are more spread out accross the spectrum of wind directions.  We see less similarity in the structure of these two facets with the previous plot.   This implies less correlation between local wind conditions and groundswell and windswell classes.
+
+In addition, notice that very few windswell, and even fewer groundswell, observations occur with local wind conditions greater than 10 m/s.
+
+
+
+## Compare Time Series Plots
+
+
+Consider this series of yearly plots showing the wave conditions for both stations:
+
+
+```{r  time series compare waves, include=TRUE, fig.width = 10, fig.height= 8, warning=FALSE}
+#function to iterate through years
+
+# y attribute vs months
+attr_time_NB_ND <- function(year, y_attr, color, shape, alpha = 0.2){
+  p <- swell %>%
+    filter(year(Date_Time) == year & !is.na(swell$swell_type) ) %>%
+    ggplot(aes_string(x = 'Date_Time', y = y_attr)) +
+    geom_point(aes_string(color = color,
+                          shape = shape),
+               alpha = alpha) +
+    facet_grid(year(Date_Time) ~ id,
+               scales = 'free_x') +
+    scale_x_datetime(breaks = breaks_width('month'),
+                     labels = date_format('%b')) +
+    scale_color_hue(drop = FALSE) +
+    theme(legend.position = 'bottom') +
+    guides(color = guide_legend(override.aes = list(size = 5, alpha = 0.7))) +
+    labs(title = paste('Wave Height', 'for Neah Bay & New Dungeness'),
+         x = 'Month',
+         y = 'Wave Height (m)',
+         color = 'Swell Type',
+         caption = 'Color Indicates Swell Type')
+  
+  print(p)
+}
+
+years <- 2014:2019
+
+years %>% walk(attr_time_NB_ND, y_attr = 'WVHT', color = 'swell_type', shape = NULL)
+
+
+```
+
+
+If we look carefully we notice a trend where a cluster of groundswell observations at the New Dungeness Buoy, seem to correspond to an increase in wave magnitude (height and period) at the Neah Bay Buoy.  In particular, compare the observations at both stations during November 2016, and also during April 2019.
+
+
+First, let's look at November 2016:
+
+
+```{r  time series compare waves Nov 2016, include=TRUE, fig.width = 10, fig.height= 8, warning=FALSE}
+#November 2016 wave heights NB & ND
+swell %>%
+    filter(year(Date_Time) == 2016 & month(Date_Time) == 11) %>%
+    ggplot(aes(x = Date_Time, y = WVHT)) +
+    geom_point(aes(color = swell_type),
+               alpha = 0.2,
+               size = 2) +
+    facet_grid(year(Date_Time) ~ id,
+               scales = 'free_x') +
+    scale_x_datetime(breaks = breaks_width('week'),
+                     labels = date_format('%d')) +
+    theme(legend.position = 'bottom') +
+    guides(color = guide_legend(override.aes = list(size = 5, alpha = 0.7))) +
+    labs(title = paste('Wave Height', 'for Neah Bay & New Dungeness'),
+         x = 'November 2016',
+         y = 'Wave Height (m)',
+         caption = paste('Color indicates', 'Swell Type'))
+  
+
+```
+
+
+I see a cluster of groundswell readings at the New Dungeness Buoy around November 23rd to 24th, 2016.  Let's have a closer look:
+
+
+```{r  time series compare waves Nov 23 2016, include=TRUE, fig.width = 10, fig.height= 8, warning=FALSE}
+#November 23 2016 wave heights NB & ND
+swell %>%
+    filter(year(Date_Time) == 2016 & month(Date_Time) == 11 & day(Date_Time) %in% c(23:24) ) %>%
+    ggplot(aes(x = Date_Time, y = WVHT)) +
+    geom_point(aes(color = dir,
+                   shape = swell_type),
+               alpha = 0.7,
+               size = 3) +
+    facet_grid(year(Date_Time) ~ id,
+               scales = 'free_x') +
+    scale_x_datetime(breaks = ,
+                     labels = label_date_short()) +
+  scale_color_hue(drop = FALSE) +
+    theme(legend.position = 'bottom') +
+    guides(color = guide_legend(override.aes = list(size = 5, alpha = 0.7))) +
+    labs(title = paste('Wave Height', 'for Neah Bay & New Dungeness'),
+         x = '',
+         y = 'Wave Height (m)',
+         color = 'Wave Direction',
+         shape = 'Swell Type',
+         caption = 'Color Indicates Wave Directions \n Shape Indicates Swell Type')
+  
+```
+
+
+Here color represents wave direction, with the shape of the point representing swell type.  Recall that chop and windwaves at the New Dungeness Bouy are likely strongly correlated with local wind conditions.  Let's explore wind conditions for both stations on November 23rd & 24th, 2016:
+
+
+```{r time series compare 11/23/16 wind, include=TRUE, fig.width=10, fig.height=8, warning=FALSE}
+swell %>%
+    filter(year(Date_Time) == 2016 & month(Date_Time) == 11 & day(Date_Time) %in% c(23:24) ) %>%
+    ggplot(aes(x = Date_Time, y = WSPD)) +
+    geom_point(aes(color = w_dir),
+             size = 3,
+             alpha = 0.7) +
+  facet_grid(year(Date_Time) ~ id,
+               scales = 'free_x') +
+    scale_x_datetime(breaks = ,
+                     labels = label_date_short()) +
+  scale_color_hue(drop = FALSE) +
+    theme(legend.position = 'bottom') +
+    guides(color = guide_legend(override.aes = list(size = 5, alpha = 0.7))) +
+    labs(title = paste('Wind Speed', 'for Neah Bay & New Dungeness'),
+         x = '',
+         y = 'Wind Speed (m/s)',
+         color = 'Wind Direcion',
+         caption = paste('Color Indicates Wind Direction'))
+
+
+```
+
+
+There is a very obvious spike in local wind speeds at the New Dungeness Buoy during the morning of November 24th.  This increase in wind strength corresponds to an increase in windwave size with a wave direction aligned with the wind direction.  We can see this 'local wind event' results in the windwave class potentially masking any underlying long period swell at the New Dungeness Buoy.
+
+Let's explore one more instance of groundswell observations at the New Dungeness Buoy.  Consider the wave observations, and concurrent wind conditions around April 5th to 10th, 2019, for both NDBC Stations:
+
+
+```{r  time series compare waves and wind april 5-10 2019, include=TRUE, fig.width = 10, fig.height= 8, warning=FALSE}
+# wave heights NB & ND
+swell %>%
+    filter(year(Date_Time) == 2019 & month(Date_Time) == 4 & day(Date_Time) %in% c(5:10) &
+             !is.na(swell$swell_type)) %>%
+    ggplot(aes(x = Date_Time, y = WVHT)) +
+    geom_point(aes(color = dir,
+                   shape = swell_type),
+               alpha = 0.7,
+               size = 3) +
+    facet_grid(year(Date_Time) ~ id,
+               scales = 'free_x') +
+    scale_x_datetime(breaks = ,
+                     labels = label_date_short()) +
+  scale_color_hue(drop = FALSE) +
+    theme(legend.position = 'bottom') +
+    guides(color = guide_legend(override.aes = list(size = 5, alpha = 0.7))) +
+    labs(title = paste('Wave Height', 'for Neah Bay & New Dungeness'),
+         x = '',
+         y = 'Wave Height (m)',
+         color = 'Wave Direction',
+         shape = 'Swell Type',
+         caption = 'Color Indicates Wave Direction \n Shape Represents Swell Type')
+
+swell %>%
+    filter(year(Date_Time) == 2019 & month(Date_Time) == 4 & day(Date_Time) %in% c(5:10) ) %>%
+    ggplot(aes(x = Date_Time, y = WSPD)) +
+    geom_point(aes(color = w_dir),
+             size = 3,
+             alpha = 0.7) +
+  facet_grid(year(Date_Time) ~ id,
+               scales = 'free_x') +
+    scale_x_datetime(breaks = ,
+                     labels = label_date_short()) +
+  scale_color_hue(drop = FALSE) +
+    theme(legend.position = 'bottom') +
+    guides(color = guide_legend(override.aes = list(size = 5, alpha = 0.7))) +
+    labs(title = paste('Wind Speed', 'for Neah Bay & New Dungeness'),
+         x = '',
+         y = 'Wind Speed (m/s)',
+         color = 'Wind Direction',
+         caption = 'Color Indicates Wind Direction')
+
+
+
+
+  
+```
+
+
+Again we see correlation between 'local wind events' at the New Dungeness Buoy and spikes in observations of windwave and chop swell types with wave directions aligned with wind directions.  Between these two wind events we see lighter wind observations and wave conditions at the New Dungeness Buoy more aligned with wave conditions at the Neah Bay Buoy. 
+
+
+
+
+## Summary, Considerations, and Next Steps
+
+We have explored meteorological conditions for both NDBC Stations and found relationship between strong wave events at the Neah Bay Buoy and observations of groundswell at the New Dungeness Buoy.  In addition we have shown the likelihood for strong correlation between local wind events and observations of windwaves and chop at the New Dungeness Buoy.  We have explored instances where these local wind events likely interferred with, or masked, recordings of underlying groundswell conditions.
+
+Moving forward, our goal is to develop a supervised machine learning model to predict the swell type at the New Dungeness Buoy, given conditions at the Neah Bay Buoy.  
+
+In preparation for this task, it will be necessary to translate swell type labels from the New Dungeness Buoy to observations at the Neah Bay Buoy.  Consider that an observation on the New Dungeness Buoy doesn't translate to an observation at the **exact same time** on the Neah Bay Buoy.  One important step will be quantifying the time-shift in this translation.  Wave speeds are a function of their period, not to mention the treadmill like affect of ocean current.  Additionally, wave direction will be another important factor to consider in quantifying this translation of observations from the New Dungeness Buoy to the Neah Bay Buoy.  
+
+Furthermore, in order to supply our model with the most accurate data, it may be necessary to subset our data to only include observations of the label corresponding to less windy conditions at the New Dungeness Buoy.  Setting a threshold around 10 m/s for winds at the New Dungeness Buoy may allow for the maximized intersection of data quantity and accuracy of observations. 
+
+
+
+## Apendix
+
+### Data Definitions
+Here we will walk through a definition and short description for each field in the dataset:
+
+- **id** indicates the location. NDBC Station ID 46087 refers to the Neah Bay Buoy and 46088 refers to the New Dungeness Buoy.
+- **Date_Time**  is the year, month, day, and time of the recorded observation.  Observations are recorded twice hourly then stored in GMT/UTC timezone by the NDBC.
+- **WVHT** is defined by the NDBC website as, "Significant wave height (meters) is calculated as the average of the highest one-third of all of the wave heights during the 20-minute sampling period."
+- **MWD** is defined by the NDBC website as, "The direction from which the waves at the dominant period (DPD) are coming. The units are degrees from true North, increasing clockwise, with North as 0 (zero) degrees and East as 90 degrees."
+- **dir** is a feature I engineered using the data from *MWD*.  Values follow the standard notation for cardinal direction, more information on cardinal direction can be found [here](https://en.wikipedia.org/wiki/Cardinal_direction).
+- **swell_type** is a feature I engineered using *DPD*.  Values indicate whether a given observation is classified as 'groundswell', having a dominant wave period of greater than or equal to 13 seconds, or 'windswell', having a dominant wave period of less than 13 seconds but greater than or equal to 10 seconds, or 'windwave', having a dominant period less than 10 seconds but greater than 4 seconds, or 'chop', having a dominant period 4 seconds or smaller, or 'flat', having dominant period equal to 0 with a wave height of 0.
+- **DPD** is defined by the NDBC website as, "Dominant wave period (seconds) is the period with the maximum wave energy."
+- **APD** is defined by the NDBC website as, "Average wave period (seconds) of all waves during the 20-minute period."
+- **WDIR** is defined by the NDBC website as, "Wind direction (the direction the wind is coming from in degrees clockwise from true N) during the same period used for WSPD."
+- **w_dir** is a feature I engineered using the datat from *WDIR* and the same value definitions as *dir*.
+- **WSPD** is defined by the NDBC website as, "Wind speed (m/s) averaged over an eight-minute period for buoys."
+- **GST** is defined by the NDBC website as, "Peak 5 or 8 second gust speed (m/s) measured during the eight-minute or two-minute period. The 5 or 8 second period can be determined by payload."
+- **PRES** is defined by the NDBC website as, "Sea level pressure (hPa)."
+- **ATMP** is defined by the NDBC website as, "Air temperature (Celsius)."
+- **WTMP** is defined by the NDBC website as, "Sea surface temperature (Celsius). For buoys the depth is referenced to the hull's waterline."
+- **DEWP** is defined by the NDBC website as, "Dewpoint temperature taken at the same height as the air temperature measurement."
+
+Further details regarding measurement techniques utilized by the NDBC can be found [here](https://www.ndbc.noaa.gov/measdes.shtml).
